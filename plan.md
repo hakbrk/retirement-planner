@@ -8,7 +8,7 @@ Replace Hawkins_Cashflow_Tool_Full_Rev26.xlsm with a sophisticated, trustworthy 
 - Secondary: Spouse (view on mobile)
 
 ## Repo
-https://github.com/hakbrk/retirement-dashboard
+https://github.com/hakbrk/retirement-planner
 
 ---
 
@@ -16,19 +16,18 @@ https://github.com/hakbrk/retirement-dashboard
 
 ### Phase 1 - MVP (Complete)
 - [x] Personal data input (DOB, target age, reserve years)
-- [x] Account input form (Brokerage, IRA, 401k, Roth, Savings, Pension, SS)
-- [x] Expense tracking (one-time, recurring, inflation-adjusted)
+- [x] Account input form (Brokerage, IRA, 401k, Roth, Savings)
+- [x] Income tab (Pension, Social Security with COLA)
+- [x] Expense tracking (one-time with date, recurring with frequency)
 - [x] Basic projection to target age
 - [x] Account access + RMD rules
 - [x] After-tax spend output (federal tax)
 - [x] Responsive dashboard view
 
 ### Phase 2 - Current
-- [ ] Social Security input (monthly benefit, claiming age)
-- [ ] Pension input (monthly amount, COLA flag)
-- [ ] State tax input (per-account or flat rate)
-- [ ] Add scenario comparison (retire now vs later)
 - [ ] Save/load user data (localStorage or JSON file)
+- [ ] Add scenario comparison (retire now vs later)
+- [ ] Investment return defaults by type (Brokerage 7%, Savings 2%, etc.)
 
 ### Phase 3 - Risk & Stress Testing
 - [ ] Risk tolerance selector (Aggressive/Moderate/Conservative return rates)
@@ -47,51 +46,30 @@ https://github.com/hakbrk/retirement-dashboard
 
 ## Core Features
 
-### 1. Account Aggregation
-- Input: Brokerage, Savings, IRA, 401k, Roth, Pension, Social Security
+### 1. Investment Accounts
+- Brokerage, Traditional IRA, Roth IRA, 401k, 401k Roth, Savings
 - Fields: Account name, type, balance, owner, expected return rate
 
-### 2. Personal Data
+### 2. Income Streams
+- Pension, Social Security
+- Monthly amount, start age, COLA flag
+
+### 3. Expenses
+- One-time: amount, date
+- Recurring: amount, start age, end age, frequency (every X years/months), inflation adj
+
+### 4. Personal Data
 - Date of birth (self + spouse)
-- Target end age (configurable, e.g., 100)
-- Reserve requirement (e.g., 2 years expenses at end)
-- Claiming ages for Social Security
+- Target end age, reserve requirement
+- Inflation rate, filing status, state tax rate
 
-### 3. Cashflow Projection Engine
-- Age-based spending limits per person
-- Account access rules (59.5 for retirement accounts, pension rules)
-- RMD calculations (Required Minimum Distributions)
-- One-time events (one-off expenses)
-- Recurring events (car every 5 years, etc.)
-
-### 4. Inflation & Income Types
-- Inflation-adjusted income (COLA)
-- Fixed income (non-COLA pension)
-- Per-account return rate assumptions
-
-### 5. Risk Tolerance Modeling
-- Return bands: Aggressive / Moderate / Conservative
-- Stress testing across scenarios
-- Monte Carlo or sensitivity analysis
-
-### 6. Scenario Comparison
-- Compare: retire now vs later, spend levels, Roth conversion strategies
-- Side-by-side results
-
-### 7. Rebalancing Rules
-- Annual review: excess savings → investments
-- Event-based: one-time inflows (home sale) → allocation
-
-### 8. Tax-Aware Output
-- **After-tax spendable amounts** (critical)
-- Federal tax brackets
-- State tax (flat rate or input)
-- Tax-deferred vs Roth vs taxable order optimization
-
-### 9. Mobile-Friendly Dashboard
-- Responsive design
-- Primary: view on mobile
-- Full interaction on desktop
+### 5. Projection Engine
+- Age-based spending limits
+- Account access rules (59.5, pension rules)
+- RMD calculations
+- After-tax spendable amounts
+- Scenario comparison
+- Risk tolerance bands
 
 ---
 
@@ -99,4 +77,3 @@ https://github.com/hakbrk/retirement-dashboard
 - Open source only
 - Web app (Streamlit, browser-based)
 - Python 3.12
-- Quick prototype first (MVP), then iterate

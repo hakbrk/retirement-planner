@@ -211,27 +211,48 @@ def main():
                 with c1:
                     expense_name = st.text_input("Expense Name", key="exp_name")
                 with c2:
-                    expense_amount = st.number_input("Annual Amount ($)", min_value=0.0, step=100.0, key="exp_amount")
+                    expense_amount = st.number_input("Amount ($)", min_value=0.0, step=100.0, key="exp_amount")
 
-                c3, c4 = st.columns(2)
-                with c3:
-                    start_age = st.number_input("Start Age", min_value=0, max_value=120, value=51, key="exp_start")
-                with c4:
-                    end_age = st.number_input("End Age", min_value=0, max_value=120, value=100, key="exp_end")
+                c2_5, c3 = st.columns(2)
+                with c2_5:
+                    expense_type = st.selectbox("Type", ["One-time", "Recurring"], key="exp_type")
+                
+                if expense_type == "One-time":
+                    with c3:
+                        expense_date = st.date_input("Date", value=None, key="exp_date")
+                    freq_value = 0
+                    freq_unit = "once"
+                    start_age = 0
+                    end_age = 0
+                else:
+                    c3, c4 = st.columns(2)
+                    with c3:
+                        start_age = st.number_input("Start Age", min_value=0, max_value=120, value=51, key="exp_start")
+                    with c4:
+                        end_age = st.number_input("End Age", min_value=0, max_value=120, value=100, key="exp_end")
+                    
+                    c5, c6 = st.columns(2)
+                    with c5:
+                        freq_value = st.number_input("Every", min_value=1, value=1, key="exp_freq_val")
+                    with c6:
+                        freq_unit = st.selectbox("Unit", ["Years", "Months"], key="exp_freq_unit")
+                    
+                    expense_date = None
 
-                c5 = st.columns(1)[0]
-                with c5:
-                    freq = st.selectbox("Frequency", ["Annual", "Monthly", "Every 5 Years", "One-time"], key="exp_freq")
+                inflation_adj = st.checkbox("Inflation Adjusted?", value=True, key="exp_inflation")
 
                 submit2 = st.form_submit_button("Add Expense")
                 if submit2 and expense_name:
                     st.session_state.expenses.append({
                         "name": expense_name,
                         "amount": expense_amount,
+                        "expense_type": expense_type,
+                        "date": expense_date,
                         "start_age": start_age,
                         "end_age": end_age,
-                        "freq": freq,
-                        "inflation_adj": True
+                        "freq_value": freq_value,
+                        "freq_unit": freq_unit,
+                        "inflation_adj": inflation_adj
                     })
                     st.rerun()
 
@@ -334,15 +355,19 @@ def run_projection(self_dob, spouse_dob, target_age, reserve_years, accounts, in
                 amount = exp["amount"]
                 if exp.get("inflation_adj", True):
                     amount *= (1 + inflation_rate) ** year_offset
-                if exp["freq"] == "Monthly":
-                    amount *= 12
-                elif exp["freq"] == "Every 5 Years":
-                    if year_offset % 5 == 0:
+                if exp["expense_type"] == "One-time":
+                    if exp.get("date") and exp["date"].year == (base_year + year_offset):
                         pass
                     else:
                         amount = 0
-                elif exp["freq"] == "One-time" and year_offset > 0:
-                    amount = 0
+                else:
+                    freq_val = exp.get("freq_value", 1)
+                    freq_unit = exp.get("freq_unit", "Years")
+                    period = freq_val if freq_unit == "Years" else freq_val / 12
+                    if year_offset % period == 0:
+                        pass
+                    else:
+                        amount = 0
                 total_expenses += amount
 
         gross_income = total_income - total_expenses
