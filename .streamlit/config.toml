@@ -1,1 +1,3 @@
-[server]\nheadless = true\nport = 8501
+[server]
+headless = true
+port = 8501

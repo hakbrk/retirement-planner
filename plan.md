@@ -33,18 +33,28 @@ https://github.com/hakbrk/retirement-planner
 - [x] Income types: Pension, SS, Dividend, Interest
 - [x] Income end age
 
-### Phase 2 - Current
-- [ ] Save/load user data (localStorage or JSON file)
+### Phase 3 - Buffer Model & Real-World Cashflow (Complete)
+- [x] Savings buffer (configurable months of expenses)
+- [x] Tax-aware cashflow: April taxes from prior year income
+- [x] Year-start rebalancing to maintain buffer target
+- [x] Excess savings → auto-deposit to brokerage
+- [x] Savings account earning interest (3.5%)
+- [x] Separate tracking: accessible vs locked funds (59.5 rule)
+- [x] Self/Spouse age tracking in projections
+- [x] Save/Load dashboard configuration to JSON file
+
+### Phase 4 - Features In Progress
+- [ ] Audit tab (investment earnings, savings balance overview)
 - [ ] Add scenario comparison (retire now vs later)
 - [ ] Investment return defaults by type (Brokerage 7%, Savings 2%, etc.)
 
-### Phase 3 - Risk & Stress Testing
+### Phase 5 - Risk & Stress Testing
 - [ ] Risk tolerance selector (Aggressive/Moderate/Conservative return rates)
 - [ ] Monte Carlo simulation
 - [ ] Stress test results (best/expected/worst case)
 - [ ] Band visualization
 
-### Phase 4 - Advanced
+### Phase 6 - Advanced
 - [ ] Roth conversion scenario
 - [ ] Tax optimization suggestions
 - [ ] Rebalancing automation rules
@@ -65,12 +75,13 @@ https://github.com/hakbrk/retirement-planner
 
 ### 3. Expenses
 - One-time: amount, date
-- Recurring: amount, start age, end age, frequency (every X years/months), inflation adj
+- Recurring: amount, start age, end age, inflation adj
 
 ### 4. Personal Data
 - Date of birth (self + spouse)
 - Target end age, RMD age
 - Inflation rate, filing status, state tax rate
+- Buffer months (savings target)
 
 ### 5. Projection Engine
 - Monthly cashflow modeling
@@ -78,7 +89,13 @@ https://github.com/hakbrk/retirement-planner
 - Account access rules (59.5, pension rules)
 - RMD calculations (IRS table, configurable age)
 - Max sustainable spend calculation
+- Savings buffer model with tax timing
 - Monthly or yearly output views
+
+### 6. Save/Load Configuration
+- Save button on each tab + sidebar
+- JSON file: `dashboard_config.json`
+- Persists: personal data, accounts, incomes, expenses
 
 ---
 
@@ -91,10 +108,12 @@ https://github.com/hakbrk/retirement-planner
 
 ## Running the App
 ```bash
-streamlit run main.py
+cd retirement_dashboard
+uv run streamlit run app/main.py
 ```
 
 ## Project Files
-- `main.py` - Streamlit UI
-- `calculations.py` - Core calculation engine (Account, IncomeStream, MonthlyProjection classes)
+- `app/main.py` - Streamlit UI
+- `app/calculations.py` - Core calculation engine (Account, IncomeStream, MonthlyProjection classes)
 - `.streamlit/config.toml` - Streamlit configuration
+- `dashboard_config.json` - User data (gitignored)

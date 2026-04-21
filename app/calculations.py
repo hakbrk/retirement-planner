@@ -19,6 +19,13 @@ def calculate_months_between(start_date, end_date):
         return 0
     return (end_date.year - start_date.year) * 12 + (end_date.month - start_date.month)
 
+def calculate_exact_age(birth_date, target_date):
+    if birth_date is None or target_date is None:
+        return None
+    rd = relativedelta(target_date, birth_date)
+    months = rd.months + rd.years * 12
+    return rd.years + rd.months / 12
+
 RMD_AGE_TABLE = {
     72: 27, 73: 26, 74: 25, 75: 24, 76: 23, 77: 22, 78: 21, 79: 20, 80: 19,
     81: 18, 82: 17, 83: 16, 84: 15, 85: 14, 86: 13, 87: 12, 88: 11, 89: 10,
@@ -180,6 +187,32 @@ class Account:
     def deposit(self, amount):
         self.balance += amount
 
+    def is_taxable(self):
+        return is_taxable(self.account_type)
+
+    def is_tax_deferred(self):
+        return is_tax_deferred(self.account_type)
+
+    def is_roth(self):
+        return is_roth(self.account_type)
+
+
+class SavingsAccount:
+    def __init__(self, balance=0, rate=0.035):
+        self.balance = balance
+        self.rate = rate
+
+    def apply_growth(self):
+        self.balance *= (1 + self.rate)
+
+    def withdraw(self, amount):
+        available = min(self.balance, amount)
+        self.balance -= available
+        return available
+
+    def deposit(self, amount):
+        self.balance += amount
+
 class IncomeStream:
     def __init__(self, name, income_type, owner, monthly_amount, start_age, end_age, cola):
         self.name = name
@@ -197,7 +230,8 @@ class IncomeStream:
 
 class MonthlyProjection:
     def __init__(self, accounts, incomes, expenses, inflation_rate, filing_status, state_tax_rate,
-                 start_date, end_age, rmd_age=73):
+                 start_date, end_age, rmd_age=73, self_dob=None, spouse_dob=None,
+                 buffer_months=12, savings_rate=0.035):
         self.accounts = accounts
         self.incomes = incomes
         self.expenses = expenses
@@ -207,18 +241,37 @@ class MonthlyProjection:
         self.start_date = start_date
         self.end_age = end_age
         self.rmd_age = rmd_age
+        self.self_dob = self_dob
+        self.spouse_dob = spouse_dob
+        self.buffer_months = buffer_months
+        self.savings_rate = savings_rate
         self.monthly_inflation = (1 + inflation_rate) ** (1/12) - 1
+        self.savings = SavingsAccount(balance=0, rate=savings_rate)
 
     def calculate_tax(self, annual_income):
         return calculate_federal_tax(annual_income, self.filing_status)
 
-    def calculate_monthly_income(self, month_offset, self_age, spouse_age):
+    def get_age_at_date(self, dob, target_date):
+        if dob is None:
+            return None
+        return relativedelta(target_date, dob).years
+
+    def get_exact_age(self, dob, target_date):
+        if dob is None:
+            return None
+        rd = relativedelta(target_date, dob)
+        return rd.years + rd.months / 12
+
+    def get_month_date(self, month_offset):
         year = self.start_date.year + month_offset // 12
         month = self.start_date.month + month_offset % 12
         if month > 12:
             month -= 12
             year += 1
+        return date(year, month if month > 0 else 12, 1)
 
+    def calculate_monthly_income(self, month_offset, self_age, spouse_age):
+        target_date = self.get_month_date(month_offset)
         income = {"self": 0, "spouse": 0}
         for inc in self.incomes:
             age = self_age if inc.owner == "Self" else spouse_age
@@ -229,17 +282,16 @@ class MonthlyProjection:
                 income[inc.owner] += inc.current_amount
         return income
 
-    def calculate_monthly_expenses(self, month_offset):
-        year_offset = month_offset // 12
+    def calculate_annual_expenses(self, year_offset):
         total = 0
         for exp in self.expenses:
-            if exp["start_age"] <= (self.start_date.year + year_offset) - (self.start_date.year):
-                if exp["end_age"] == 0 or exp["end_age"] >= year_offset + (self.start_date.year - self.start_date.year):
+            if exp["start_age"] <= year_offset:
+                if exp["end_age"] == 0 or exp["end_age"] >= year_offset:
                     amount = exp["amount"]
                     if exp.get("inflation_adj", True):
                         amount *= (1 + self.inflation_rate) ** year_offset
                     total += amount
-        return total / 12
+        return total
 
     def calculate_rmd_required(self, account, age):
         if age < self.rmd_age:
@@ -248,24 +300,32 @@ class MonthlyProjection:
             return calculate_rmd(age, account.balance)
         return 0
 
-    def can_access(self, account, age):
-        return is_account_accessible(account.account_type, age)
+    def can_access(self, account, self_age, spouse_age):
+        owner_age = self_age if account.owner in ["Self", "Both"] else spouse_age
+        return is_account_accessible(account.account_type, owner_age)
+
+    def get_accessible_balance(self, self_age, spouse_age):
+        accessible = 0
+        non_accessible = 0
+        for acc in self.accounts:
+            if self.can_access(acc, self_age, spouse_age):
+                accessible += acc.balance
+            else:
+                non_accessible += acc.balance
+        return accessible, non_accessible
 
     def withdraw_tax_efficient(self, amount_needed, self_age, spouse_age):
         if amount_needed <= 0:
             return {}
 
-        available_ages = {"self": self_age, "spouse": spouse_age}
         available = {}
         remaining = amount_needed
 
         sorted_accounts = sorted(self.accounts, key=lambda a: get_withdrawal_priority(a.account_type))
 
         for acc in sorted_accounts:
-            age = available_ages.get(acc.owner, self_age)
-            if not self.can_access(acc, age):
+            if not self.can_access(acc, self_age, spouse_age):
                 continue
-
             if acc.balance <= 0:
                 continue
 
@@ -281,12 +341,128 @@ class MonthlyProjection:
 
         return available
 
+    def deposit_to_brokerage(self, amount):
+        for acc in self.accounts:
+            if acc.account_type == "Brokerage":
+                acc.deposit(amount)
+                return
+        if self.accounts:
+            self.accounts[0].deposit(amount)
+
+    def rebalance_for_buffer(self, annual_expenses, prior_year_tax, self_age, spouse_age):
+        target_savings = (annual_expenses + prior_year_tax) * (1 + self.buffer_months / 12)
+        
+        current_savings = self.savings.balance
+        current_savings *= (1 + self.savings_rate)
+        
+        shortfall = max(0, target_savings - current_savings)
+        
+        if shortfall > 0:
+            withdrawals = self.withdraw_tax_efficient(shortfall, self_age, spouse_age)
+            for amount in withdrawals.values():
+                self.savings.deposit(amount)
+        
+        excess = max(0, current_savings - target_savings)
+        if excess > 0:
+            self.savings.withdraw(excess)
+            self.deposit_to_brokerage(excess)
+
+    def run_projection(self, monthly_spend):
+        results = []
+        
+        self_age = self.get_age_at_date(self.self_dob, self.start_date) if self.self_dob else calculate_age(self.start_date)
+        spouse_age = self.get_age_at_date(self.spouse_dob, self.start_date) if self.spouse_dob else self_age - 2
+
+        total_months = (self.end_age - self_age) * 12 if self_age else 600
+
+        prior_year_income = 0
+        prior_year_withdrawals = 0
+        prior_year_tax = 0
+
+        current_year = self.start_date.year
+
+        for month in range(total_months):
+            month_offset = month
+            target_date = self.get_month_date(month_offset)
+            
+            current_self_age = self.get_exact_age(self.self_dob, target_date) if self.self_dob else self_age + month_offset / 12
+            current_spouse_age = self.get_exact_age(self.spouse_dob, target_date) if self.spouse_dob else spouse_age + month_offset / 12
+
+            if target_date.month == 1 and target_date.year > current_year:
+                self.savings.apply_growth()
+                annual_expenses = self.calculate_annual_expenses(target_date.year - self.start_date.year)
+                self.rebalance_for_buffer(annual_expenses, prior_year_tax, current_self_age, current_spouse_age)
+                current_year = target_date.year
+
+            income = self.calculate_monthly_income(month_offset, current_self_age, current_spouse_age)
+            income_total = income.get("self", 0) + income.get("spouse", 0)
+
+            self.savings.deposit(income_total)
+
+            expenses = monthly_spend
+            savings_withdrawal = self.savings.withdraw(expenses)
+
+            for acc in self.accounts:
+                acc.apply_growth(self.monthly_inflation)
+
+            rmd_total = 0
+            for acc in self.accounts:
+                rm_age = current_self_age if acc.owner in ["Self", "Both"] else current_spouse_age
+                if rm_age and rm_age >= self.rmd_age:
+                    rmd = self.calculate_rmd_required(acc, int(rm_age))
+                    if rmd > 0:
+                        acc.balance -= rmd
+                        rmd_total += rmd
+
+            taxable_income = income_total + rmd_total - 14600/12
+            if taxable_income > 0:
+                federal_tax = self.calculate_tax((income_total + rmd_total) * 12) / 12
+            else:
+                federal_tax = 0
+
+            state_tax = (income_total + rmd_total) * self.state_tax_rate / 12
+            after_tax = income_total + rmd_total - expenses - federal_tax - state_tax
+
+            if target_date.month == 12:
+                prior_year_income = income_total * 12
+                prior_year_withdrawals = 0
+                prior_year_tax = (federal_tax + state_tax) * 12
+
+            accessible, non_accessible = self.get_accessible_balance(current_self_age, current_spouse_age)
+
+            results.append({
+                "month": month + 1,
+                "year": target_date.year,
+                "self_age": int(current_self_age) if current_self_age else None,
+                "spouse_age": int(current_spouse_age) if current_spouse_age else None,
+                "income": income_total,
+                "savings_withdrawal": savings_withdrawal,
+                "rmd": rmd_total,
+                "expenses": expenses,
+                "federal_tax": federal_tax,
+                "state_tax": state_tax,
+                "savings_balance": self.savings.balance,
+                "accessible": accessible,
+                "non_accessible": non_accessible,
+                "total_assets": sum(a.balance for a in self.accounts),
+            })
+
+        return results
+
     def find_max_sustainable_spend(self, target_months=None):
+        total_assets = sum(a.balance for a in self.accounts) + 240000
+        if total_assets <= 0:
+            return 0
+            
         if target_months is None:
-            target_months = (self.end_age - 50) * 12
+            if self.self_dob:
+                current_age = self.get_age_at_date(self.self_dob, self.start_date)
+            else:
+                current_age = 50
+            target_months = (self.end_age - current_age) * 12
 
         low = 0
-        high = sum(a.balance for a in self.accounts) * 0.1
+        high = total_assets / (target_months / 12) * 0.5
         best = 0
 
         for _ in range(50):
@@ -302,97 +478,43 @@ class MonthlyProjection:
     def test_spend_level(self, monthly_spend, months):
         temp_accounts = [Account(a.name, a.account_type, a.owner, a.balance, a.return_rate) for a in self.accounts]
         temp_incomes = [IncomeStream(i.name, i.income_type, i.owner, i.monthly_amount, i.start_age, i.end_age, i.cola) for i in self.incomes]
+        temp_savings = SavingsAccount(balance=240000, rate=self.savings_rate)
 
         for month in range(months):
             month_offset = month
-            self_age = 52 + month_offset // 12
-            spouse_age = 50 + month_offset // 12
+            target_date = self.get_month_date(month_offset)
+            
+            self_age = self.get_exact_age(self.self_dob, target_date) if self.self_dob else 50 + month_offset / 12
+            spouse_age = self.get_exact_age(self.spouse_dob, target_date) if self.spouse_dob else 48 + month_offset / 12
 
             income = 0
             for inc in temp_incomes:
-                if inc.start_age <= self_age <= inc.end_age:
+                age = self_age if inc.owner == "Self" else spouse_age
+                if inc.start_age <= age <= inc.end_age:
                     income += inc.current_amount
 
-            expenses = monthly_spend
+            temp_savings.deposit(income)
+            savings_withdrawal = temp_savings.withdraw(monthly_spend)
 
-            short_fall = max(0, expenses - income)
+            for acc in temp_accounts:
+                acc.apply_growth(acc.return_rate / 12)
 
+            short_fall = monthly_spend - savings_withdrawal
             if short_fall > 0:
-                for acc in temp_accounts:
+                sorted_accounts = sorted(temp_accounts, key=lambda a: get_withdrawal_priority(a.account_type))
+                for acc in sorted_accounts:
+                    if not self.can_access(acc, self_age, spouse_age):
+                        continue
                     if acc.balance > 0:
                         available = acc.withdraw(short_fall)
                         short_fall -= available
+                        temp_savings.deposit(available)
                         if short_fall <= 0:
                             break
                 if short_fall > 0:
                     return False
 
-            for acc in temp_accounts:
-                acc.apply_growth(acc.return_rate / 12)
+            if target_date.month == 12:
+                temp_savings.apply_growth()
 
-        return sum(a.balance for a in temp_accounts) > 0
-
-    def run_projection(self, monthly_spend):
-        results = []
-        start_self_age = calculate_age(self.start_date)
-        start_spouse_age = calculate_age(self.start_date.replace(year=self.start_date.year - 2)) if self.start_date else 50
-
-        self_age = calculate_age(self.start_date)
-        spouse_age = self_age - 2
-
-        total_months = (self.end_age - self_age) * 12
-
-        for month in range(total_months):
-            month_offset = month
-            current_self_age = self_age + month_offset // 12
-            current_spouse_age = spouse_age + month_offset // 12
-            current_age = min(current_self_age, current_spouse_age)
-
-            income = self.calculate_monthly_income(month_offset, current_self_age, current_spouse_age)
-            income_total = income.get("self", 0) + income.get("spouse", 0)
-
-            expenses = monthly_spend
-
-            for acc in self.accounts:
-                acc.apply_growth(self.monthly_inflation)
-
-            rmd_total = 0
-            for acc in self.accounts:
-                if current_self_age >= self.rmd_age:
-                    rmd = self.calculate_rmd_required(acc, current_self_age)
-                    if rmd > 0:
-                        acc.balance -= rmd
-                        rmd_total += rmd
-
-            short_fall = max(0, expenses - income_total - rmd_total)
-            withdrawals = {}
-            if short_fall > 0:
-                withdrawals = self.withdraw_tax_efficient(short_fall, current_self_age, current_spouse_age)
-
-            total_withdrawn = sum(withdrawals.values())
-            income_total += total_withdrawn + rmd_total
-
-            taxable_income = income_total - 14600/12
-            if taxable_income > 0:
-                federal_tax = self.calculate_tax(income_total * 12) / 12
-            else:
-                federal_tax = 0
-
-            state_tax = income_total * self.state_tax_rate / 12
-            after_tax = income_total - expenses - federal_tax - state_tax
-
-            results.append({
-                "month": month + 1,
-                "year": self.start_date.year + month // 12,
-                "age": current_age,
-                "income": income_total,
-                "withdrawals": total_withdrawn,
-                "rmd": rmd_total,
-                "expenses": expenses,
-                "federal_tax": federal_tax,
-                "state_tax": state_tax,
-                "after_tax": after_tax,
-                "total_assets": sum(a.balance for a in self.accounts),
-            })
-
-        return results
+        return temp_savings.balance > 0 or sum(a.balance for a in temp_accounts) > 0
