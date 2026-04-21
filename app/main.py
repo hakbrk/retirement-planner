@@ -2,57 +2,15 @@ import streamlit as st
 import pandas as pd
 from datetime import date, timedelta
 from dateutil.relativedelta import relativedelta
+from app.calculations import (
+    calculate_age, calculate_federal_tax, calculate_rmd, calculate_ss_taxation,
+    Account, IncomeStream, MonthlyProjection, calculate_rmd_irs_table
+)
 
 st.set_page_config(page_title="Retirement Dashboard", page_icon="📊", layout="wide")
 
 INVESTMENT_TYPES = ["Brokerage", "Traditional IRA", "Roth IRA", "401k", "401k Roth", "Savings"]
-OWNERS = ["Self", "Spouse"]
-
-def calculate_age(birth_date):
-    if birth_date is None:
-        return None
-    today = date.today()
-    return relativedelta(today, birth_date).years
-
-def calculate_rmd(age, balance):
-    rmd_table = {
-        72: 27, 73: 26, 74: 25, 75: 24, 76: 23, 77: 22, 78: 21, 79: 20, 80: 19,
-        81: 18, 82: 17, 83: 16, 84: 15, 85: 14, 86: 13, 87: 12, 88: 11, 89: 10,
-        90: 9, 91: 8, 92: 7, 93: 6, 94: 5, 95: 4, 96: 3, 97: 2, 98: 1, 99: 1, 100: 1
-    }
-    divisor = rmd_table.get(age, 1)
-    return balance / divisor if divisor > 0 else balance
-
-def calculate_tax(income, filing_status="Married Filing Jointly"):
-    brackets = [
-        (23850, 0.10),
-        (96950, 0.12),
-        (206700, 0.22),
-        (394400, 0.24),
-        (501950, 0.32),
-        (751600, 0.35),
-        (float('inf'), 0.37)
-    ] if filing_status == "Married Filing Jointly" else [
-        (11950, 0.10),
-        (48450, 0.12),
-        (103350, 0.22),
-        (197300, 0.24),
-        (250950, 0.35),
-        (677050, 0.37),
-        (float('inf'), 0.37)
-    ]
-    tax = 0
-    remaining = income
-    prev_limit = 0
-    for limit, rate in brackets:
-        if remaining <= 0:
-            break
-        taxable = min(remaining, limit - prev_limit)
-        if taxable > 0:
-            tax += taxable * rate
-            remaining -= taxable
-        prev_limit = limit
-    return tax
+OWNERS = ["Self", "Spouse", "Both"]
 
 def main():
     st.title("📊 Retirement Cashflow Dashboard")
@@ -72,17 +30,18 @@ def main():
 
         with tab1:
             st.subheader("Personal Information")
+            min_date = date(1920, 1, 1)
             c1, c2 = st.columns(2)
             with c1:
-                self_dob = st.date_input("Your Date of Birth", value=None, key="self_dob")
+                self_dob = st.date_input("Your Date of Birth", value=None, min_value=min_date, key="self_dob")
             with c2:
-                spouse_dob = st.date_input("Spouse Date of Birth", value=None, key="spouse_dob")
+                spouse_dob = st.date_input("Spouse Date of Birth", value=None, min_value=min_date, key="spouse_dob")
 
             c3, c4, c5 = st.columns(3)
             with c3:
                 target_age = st.number_input("Plan to Age", value=100, min_value=60, max_value=120, key="target_age")
             with c4:
-                reserve_years = st.number_input("Reserve Years at End", value=2, min_value=0, max_value=10, key="reserve_years")
+                rmd_age = st.number_input("RMD Age", value=73, min_value=70, max_value=75, key="rmd_age")
             with c5:
                 inflation_rate = st.number_input("Inflation Rate (%)", value=3.0, min_value=0.0, max_value=20.0, step=0.5, key="inflation_rate") / 100
 
@@ -127,6 +86,8 @@ def main():
                         "balance": balance,
                         "return_rate": return_rate
                     })
+                    st.session_state.acct_name = ""
+                    st.session_state.acct_balance = 0.0
                     st.rerun()
 
             st.subheader("Your Investment Accounts")
@@ -157,11 +118,11 @@ def main():
                 with c1:
                     income_name = st.text_input("Income Name", key="income_name")
                 with c2:
-                    income_type = st.selectbox("Type", ["Pension", "Social Security"], key="income_type")
+                    income_type = st.selectbox("Type", ["Pension", "Social Security", "Dividend", "Interest"], key="income_type")
 
                 c3, c4 = st.columns(2)
                 with c3:
-                    owner = st.selectbox("Owner", OWNERS, key="income_owner")
+                    owner = st.selectbox("Owner", ["Self", "Spouse"], key="income_owner")
                 with c4:
                     monthly_amount = st.number_input("Monthly Amount ($)", min_value=0.0, step=100.0, key="monthly_amount")
 
@@ -169,7 +130,13 @@ def main():
                 with c5:
                     start_age = st.number_input("Start Age", min_value=0, max_value=120, value=62, key="income_start_age")
                 with c6:
+                    end_age = st.number_input("End Age (0 = never ends)", min_value=0, max_value=120, value=0, key="income_end_age")
+
+                c7, c8 = st.columns(2)
+                with c7:
                     cola = st.checkbox("COLA Adjusted (Inflation Protected)?", value=True, key="cola")
+                with c8:
+                    pass
 
                 submit3 = st.form_submit_button("Add Income")
                 if submit3 and income_name:
@@ -179,8 +146,11 @@ def main():
                         "owner": owner,
                         "monthly_amount": monthly_amount,
                         "start_age": start_age,
+                        "end_age": end_age,
                         "cola": cola
                     })
+                    st.session_state.income_name = ""
+                    st.session_state.monthly_amount = 0.0
                     st.rerun()
 
             st.subheader("Your Income Streams")
@@ -188,16 +158,7 @@ def main():
 
             if incomes:
                 for i, inc in enumerate(incomes):
-                    with st.expander(f"{inc['name']} - ${inc['monthly_amount']:,.0f}/month starting age {inc['start_age']}"):
-                        c1, c2 = st.columns(2)
-                        with c1:
-                            new_amount = st.number_input("Monthly", value=inc["monthly_amount"], min_value=0.0, key=f"inc_{i}")
-                        with c2:
-                            new_start = st.number_input("Start Age", value=inc["start_age"], min_value=0, max_value=120, key=f"sta_{i}")
-                        if st.button("Update Income", key=f"updinc_{i}"):
-                            incomes[i]["monthly_amount"] = new_amount
-                            incomes[i]["start_age"] = new_start
-                            st.rerun()
+                    with st.expander(f"{inc['name']} - ${inc['monthly_amount']:,.0f}/mo"):
                         if st.button("Delete Income", key=f"delinc_{i}"):
                             incomes.pop(i)
                             st.rerun()
@@ -209,50 +170,36 @@ def main():
             with st.form("add_expense"):
                 c1, c2 = st.columns(2)
                 with c1:
-                    expense_name = st.text_input("Expense Name", key="exp_name")
+                    expense_name = st.text_input("Expense Name", key="expense_name")
                 with c2:
-                    expense_amount = st.number_input("Amount ($)", min_value=0.0, step=100.0, key="exp_amount")
+                    expense_type = st.selectbox("Type", ["Monthly", "Annual", "One-time"], key="expense_type")
 
-                c2_5, c3 = st.columns(2)
-                with c2_5:
-                    expense_type = st.selectbox("Type", ["One-time", "Recurring"], key="exp_type")
-                
+                c3, c4 = st.columns(2)
+                with c3:
+                    amount = st.number_input("Amount ($)", min_value=0.0, step=100.0, key="expense_amount")
+                with c4:
+                    start_age = st.number_input("Start Age", min_value=0, max_value=120, value=50, key="exp_start_age")
+
+                c5, c6 = st.columns(2)
+                with c5:
+                    end_age = st.number_input("End Age (0 = never ends)", min_value=0, max_value=120, value=0, key="exp_end_age")
+                with c6:
+                    inflation_adj = st.checkbox("Inflation Adjusted?", value=True, key="exp_inf_adj")
+
+                expense_date = None
                 if expense_type == "One-time":
-                    with c3:
-                        expense_date = st.date_input("Date", value=None, key="exp_date")
-                    freq_value = 0
-                    freq_unit = "once"
-                    start_age = 0
-                    end_age = 0
-                else:
-                    c3, c4 = st.columns(2)
-                    with c3:
-                        start_age = st.number_input("Start Age", min_value=0, max_value=120, value=51, key="exp_start")
-                    with c4:
-                        end_age = st.number_input("End Age", min_value=0, max_value=120, value=100, key="exp_end")
-                    
-                    c5, c6 = st.columns(2)
-                    with c5:
-                        freq_value = st.number_input("Every", min_value=1, value=1, key="exp_freq_val")
-                    with c6:
-                        freq_unit = st.selectbox("Unit", ["Years", "Months"], key="exp_freq_unit")
-                    
-                    expense_date = None
-
-                inflation_adj = st.checkbox("Inflation Adjusted?", value=True, key="exp_inflation")
+                    expense_date = st.date_input("Date", value=None, key="exp_date")
 
                 submit2 = st.form_submit_button("Add Expense")
                 if submit2 and expense_name:
                     st.session_state.expenses.append({
                         "name": expense_name,
-                        "amount": expense_amount,
                         "expense_type": expense_type,
-                        "date": expense_date,
+                        "amount": amount,
                         "start_age": start_age,
                         "end_age": end_age,
-                        "freq_value": freq_value,
-                        "freq_unit": freq_unit,
-                        "inflation_adj": inflation_adj
+                        "inflation_adj": inflation_adj,
+                        "date": expense_date
                     })
                     st.rerun()
 
@@ -261,7 +208,7 @@ def main():
 
             if expenses:
                 for i, exp in enumerate(expenses):
-                    with st.expander(f"{exp['name']} - ${exp['amount']:,.0f}/year"):
+                    with st.expander(f"{exp['name']} - ${exp['amount']:,.0f}"):
                         if st.button("Delete Expense", key=f"delexp_{i}"):
                             expenses.pop(i)
                             st.rerun()
@@ -273,14 +220,78 @@ def main():
 
             if not self_dob:
                 st.warning("Please enter your birth date")
-            elif not accounts and not incomes:
-                st.warning("Add accounts or income streams")
+            elif not accounts:
+                st.warning("Add investment accounts")
             else:
-                results = run_projection(
-                    self_dob, spouse_dob, target_age, reserve_years,
-                    accounts, incomes, expenses, inflation_rate, filing_status, state_tax_rate
+                accounts = st.session_state.accounts
+                incomes = st.session_state.incomes
+                expenses = st.session_state.expenses
+                
+                account_objs = [Account(a["name"], a["type"], a["owner"], a["balance"], a["return_rate"]) for a in accounts]
+                income_objs = [IncomeStream(i["name"], i["type"], i["owner"], i["monthly_amount"], i["start_age"], i["end_age"], i["cola"]) for i in incomes]
+                
+                start_date = date.today()
+                projection = MonthlyProjection(
+                    account_objs, income_objs, expenses,
+                    inflation_rate, filing_status, state_tax_rate,
+                    start_date, target_age, rmd_age
                 )
-                display_results(results)
+                
+                m1, m2 = st.columns(2)
+                with m1:
+                    show_monthly = st.toggle("Show Monthly", value=False)
+                with m2:
+                    calculate_max = st.button("Calculate Max Sustainable Spend", type="secondary")
+                
+                if calculate_max:
+                    with st.spinner("Calculating max sustainable spend..."):
+                        max_spend = projection.find_max_sustainable_spend()
+                    st.success(f"Max sustainable monthly spend: ${max_spend:,.0f}")
+                
+                default_spend = st.number_input("Monthly Spend to Project ($)", value=10000, min_value=0, step=500, key="monthly_spend")
+                
+                results = projection.run_projection(default_spend)
+                
+                if show_monthly:
+                    df = pd.DataFrame(results)
+                    st.dataframe(df, use_container_width=True, hide_index=True)
+                else:
+                    yearly_df = []
+                    for i in range(0, len(results), 12):
+                        chunk = results[i:i+12]
+                        if chunk:
+                            yearly_df.append({
+                                "year": chunk[0]["year"],
+                                "age": chunk[0]["age"],
+                                "income": sum(r["income"] for r in chunk),
+                                "withdrawals": sum(r["withdrawals"] for r in chunk),
+                                "rmd": sum(r["rmd"] for r in chunk),
+                                "expenses": sum(r["expenses"] for r in chunk),
+                                "federal_tax": sum(r["federal_tax"] for r in chunk),
+                                "state_tax": sum(r["state_tax"] for r in chunk),
+                                "after_tax": sum(r["after_tax"] for r in chunk),
+                                "total_assets": chunk[-1]["total_assets"] if chunk else 0
+                            })
+                    df = pd.DataFrame(yearly_df)
+                    display_df = df.copy()
+                    for col in ["income", "withdrawals", "rmd", "expenses", "federal_tax", "state_tax", "after_tax", "total_assets"]:
+                        display_df[col] = display_df[col].apply(lambda x: f"${x:,.0f}")
+                    st.dataframe(display_df, use_container_width=True, hide_index=True)
+                
+                st.subheader("Asset Balance Over Time")
+                if results:
+                    chart_data = []
+                    for i in range(0, len(results), 12):
+                        chunk = results[i]
+                        if chunk:
+                            chart_data.append({"year": chunk["year"], "age": chunk["age"], "assets": chunk["total_assets"]})
+                    chart_df = pd.DataFrame(chart_data)
+                    st.line_chart(chart_df.set_index("year")["assets"])
+                
+                if results and results[-1]["total_assets"] <= 0:
+                    st.error("⚠️ Money runs out before target age!")
+                else:
+                    st.success(f"✓ Money lasts through age {target_age}")
 
     with col2:
         st.subheader("Summary")
@@ -298,136 +309,7 @@ def main():
 
         st.write("**Income Streams:**")
         for inc in incomes:
-            st.write(f"- {inc['name']}: ${inc['monthly_amount']:,.0f}/mo" + (" (COLA)" if inc["cola"] else ""))
-
-def run_projection(self_dob, spouse_dob, target_age, reserve_years, accounts, incomes, expenses, inflation_rate, filing_status, state_tax_rate):
-    from datetime import date
-
-    results = []
-    base_year = date.today().year
-
-    self_age = calculate_age(self_dob)
-    spouse_age = calculate_age(spouse_dob) if spouse_dob else None
-
-    younger_age = min(self_age, spouse_age) if spouse_age else self_age
-
-    account_balances = {i: a["balance"] for i, a in enumerate(accounts)}
-
-    for year_offset in range(target_age - younger_age + 1):
-        current_self_age = self_age + year_offset
-        current_spouse_age = (spouse_age + year_offset) if spouse_age else None
-        current_younger_age = younger_age + year_offset
-
-        if current_younger_age > 100:
-            break
-
-        income_from_accounts = 0
-        rmd_amount = 0
-
-        for i, acc in enumerate(accounts):
-            balance = account_balances.get(i, acc["balance"])
-            return_rate = acc["return_rate"]
-
-            growth = balance * return_rate
-            account_balances[i] = balance + growth
-
-            access_age = 59.5
-            if current_self_age >= access_age or (current_spouse_age and current_spouse_age >= access_age):
-                if acc["type"] in ["Traditional IRA", "401k"] and current_self_age >= 73:
-                    rmd = calculate_rmd(current_self_age, account_balances[i])
-                    rmd_amount += rmd
-                    account_balances[i] -= rmd
-                    income_from_accounts += rmd
-
-        income_from_pensions = 0
-        for inc in incomes:
-            if inc["start_age"] <= current_younger_age:
-                amount = inc["monthly_amount"] * 12
-                if not inc.get("cola"):
-                    amount *= (1 + inflation_rate) ** year_offset
-                income_from_pensions += amount
-
-        total_income = income_from_accounts + income_from_pensions
-
-        total_expenses = 0
-        for exp in expenses:
-            if exp["start_age"] <= current_younger_age <= exp["end_age"]:
-                amount = exp["amount"]
-                if exp.get("inflation_adj", True):
-                    amount *= (1 + inflation_rate) ** year_offset
-                if exp["expense_type"] == "One-time":
-                    if exp.get("date") and exp["date"].year == (base_year + year_offset):
-                        pass
-                    else:
-                        amount = 0
-                else:
-                    freq_val = exp.get("freq_value", 1)
-                    freq_unit = exp.get("freq_unit", "Years")
-                    period = freq_val if freq_unit == "Years" else freq_val / 12
-                    if year_offset % period == 0:
-                        pass
-                    else:
-                        amount = 0
-                total_expenses += amount
-
-        gross_income = total_income - total_expenses
-        if gross_income < 0:
-            gross_income = 0
-        elif gross_income < 14600:
-            federal_tax = 0
-        else:
-            federal_tax = calculate_tax(gross_income, filing_status)
-        state_tax = gross_income * state_tax_rate
-
-        after_tax = gross_income - federal_tax - state_tax
-
-        results.append({
-            "year": base_year + year_offset,
-            "age": current_younger_age,
-            "investment_growth": income_from_accounts,
-            "rmd": rmd_amount,
-            "pension_ss": income_from_pensions,
-            "expenses": total_expenses,
-            "gross": gross_income,
-            "federal_tax": federal_tax,
-            "state_tax": state_tax,
-            "after_tax": after_tax,
-            "total_assets": sum(account_balances.values()),
-        })
-
-    return results
-
-def display_results(results):
-    if not results:
-        return
-
-    df = pd.DataFrame(results)
-    df["year"] = df["year"].astype(int)
-    df["age"] = df["age"].astype(int)
-
-    st.subheader("Yearly After-Tax Spendable")
-
-    cols = st.columns(2)
-    with cols[0]:
-        st.metric("Average Annual Spend", f"${df['after_tax'].mean():,.0f}")
-    with cols[1]:
-        st.metric("First Year Spend", f"${df.iloc[0]['after_tax']:,.0f}")
-
-    st.subheader("Projected Spend Over Time")
-    chart_data = df[["year", "after_tax", "age"]].copy()
-    st.line_chart(chart_data.set_index("year")["after_tax"])
-
-    st.subheader("Detailed Projection")
-    display_df = df.copy()
-    for col in ["investment_growth", "rmd", "pension_ss", "expenses", "gross", "federal_tax", "state_tax", "after_tax", "total_assets"]:
-        display_df[col] = display_df[col].apply(lambda x: f"${x:,.0f}")
-    st.dataframe(display_df, use_container_width=True, hide_index=True)
-
-    years_negative = len(df[df["after_tax"] < 0])
-    if years_negative > 0:
-        st.error(f"⚠️ Projection goes negative in {years_negative} years!")
-    else:
-        st.success("✓ Money lasts through target age!")
+            st.write(f"- {inc['name']}: ${inc['monthly_amount']:,.0f}/mo" + (" (COLA)" if inc.get("cola") else ""))
 
 if __name__ == "__main__":
     main()

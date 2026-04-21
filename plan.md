@@ -24,6 +24,15 @@ https://github.com/hakbrk/retirement-planner
 - [x] After-tax spend output (federal tax)
 - [x] Responsive dashboard view
 
+### Phase 2 - Monthly Cashflow Engine (Complete)
+- [x] Monthly granularity projection engine
+- [x] Tax-efficient withdrawal order (Brokerage → Savings → Traditional → Roth)
+- [x] RMD calculation per current IRS life expectancy tables
+- [x] Max sustainable spend calculator (binary search)
+- [x] Monthly/Yearly display toggle
+- [x] Income types: Pension, SS, Dividend, Interest
+- [x] Income end age
+
 ### Phase 2 - Current
 - [ ] Save/load user data (localStorage or JSON file)
 - [ ] Add scenario comparison (retire now vs later)
@@ -51,8 +60,8 @@ https://github.com/hakbrk/retirement-planner
 - Fields: Account name, type, balance, owner, expected return rate
 
 ### 2. Income Streams
-- Pension, Social Security
-- Monthly amount, start age, COLA flag
+- Pension, Social Security, Dividend, Interest
+- Monthly amount, start age, end age, COLA flag
 
 ### 3. Expenses
 - One-time: amount, date
@@ -60,16 +69,16 @@ https://github.com/hakbrk/retirement-planner
 
 ### 4. Personal Data
 - Date of birth (self + spouse)
-- Target end age, reserve requirement
+- Target end age, RMD age
 - Inflation rate, filing status, state tax rate
 
 ### 5. Projection Engine
-- Age-based spending limits
+- Monthly cashflow modeling
+- Tax-efficient withdrawal sequencing
 - Account access rules (59.5, pension rules)
-- RMD calculations
-- After-tax spendable amounts
-- Scenario comparison
-- Risk tolerance bands
+- RMD calculations (IRS table, configurable age)
+- Max sustainable spend calculation
+- Monthly or yearly output views
 
 ---
 
@@ -77,3 +86,15 @@ https://github.com/hakbrk/retirement-planner
 - Open source only
 - Web app (Streamlit, browser-based)
 - Python 3.12
+
+---
+
+## Running the App
+```bash
+streamlit run main.py
+```
+
+## Project Files
+- `main.py` - Streamlit UI
+- `calculations.py` - Core calculation engine (Account, IncomeStream, MonthlyProjection classes)
+- `.streamlit/config.toml` - Streamlit configuration
