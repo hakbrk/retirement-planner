@@ -33,24 +33,24 @@ Open http://localhost:8501 in your browser.
 
 ## Current Development Priority
 
-**Debug Phase 1 max spend calculation**. The `test_spend_level()` function incorrectly returns True when it should return False.
+**Phase 4**: Audit tab and scenario comparison. The two-phase max spend calculation has been overhauled and should now be producing realistic results. Next step is to run the app and verify outputs before building the audit tab.
 
-### Test Case
-- Start date: April 2026
-- Self DOB: Sept 1, 1974 → turns 59.5 in March 2034
-- Months to 59.5: **95 months**
-- Accessible funds (pre-59.5): $710K (Savings $223K + Brokerage $487K)
-- Real return: ~3.4%/year
-- Spending: $12K/mo
+## Max Spend Calculation — Design Notes
 
-### Expected Behavior
-Should FAIL because $710K + growth can't sustain $12K/mo for 95 months.
+The two-phase max spend logic in `find_max_sustainable_spend()` works as follows:
 
-### Where to Debug
-In `app/calculations.py`, the `test_spend_level()` method (line 544):
-- Growth rate calculations may still be using nominal instead of real
-- Savings growth might not be using real rate
-- Withdrawal logic may not handle failure correctly
+### Phase Boundary
+`get_primary_unlock_months()` finds the phase boundary by scanning all locked accounts (IRA, 401k, Roth) and determining which owner — Self or Spouse — holds the larger total locked balance. The phase split occurs when that owner turns 59.5. Smaller unlocks that happen mid-phase are handled naturally inside `test_spend_level()` via `can_access()`.
+
+### Joint Optimization
+Phase 1 and Phase 2 are optimized jointly via `test_two_phase_spend()`. The binary search finds the maximum base spend sustainable across **both** phases — this prevents Phase 1 from over-spending and stranding Phase 2. Phase 2 is then separately optimized upward from the Phase 1 ending balance; it will be >= Phase 1 by construction, and higher when income (pension, SSI) kicks in.
+
+### Key Bugs Fixed (April 2026)
+- `_binary_search_spend`: double-counted Savings balance in upper bound (inflated search range)
+- `start_balance_phase_2`: used hardcoded $240K savings instead of actual balance
+- `start_balance_phase_2`: grew accounts at nominal rate instead of real rate
+- `start_balance_phase_2`: incorrectly credited income during Phase 1 simulation (Phase 1 runs with `include_income=False`)
+- Phase boundary used youngest person's 59.5 instead of the owner with the largest locked balance
 
 ## Project Phases
 

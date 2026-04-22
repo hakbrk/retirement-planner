@@ -465,65 +465,103 @@ class MonthlyProjection:
 
         return results
 
+    def get_self_age(self):
+        return self.get_age_at_date(self.self_dob, self.start_date) if self.self_dob else 65
+
     def get_youngest_age(self):
         self_age = self.get_age_at_date(self.self_dob, self.start_date) if self.self_dob else 65
         spouse_age = self.get_age_at_date(self.spouse_dob, self.start_date) if self.spouse_dob else 60
         return min(self_age, spouse_age)
+
+    def get_primary_unlock_months(self):
+        """Return months until the largest unlock event (by balance), or None if no locked accounts."""
+        self_age = self.get_age_at_date(self.self_dob, self.start_date) if self.self_dob else 65
+        spouse_age = self.get_age_at_date(self.spouse_dob, self.start_date) if self.spouse_dob else 60
+
+        unlock_value = {"Self": 0, "Spouse": 0}
+        for acc in self.accounts:
+            if account_access_age(acc.account_type) >= 59.5 and acc.balance > 0:
+                if acc.owner in ("Self", "Both"):
+                    unlock_value["Self"] += acc.balance
+                if acc.owner in ("Spouse", "Both"):
+                    unlock_value["Spouse"] += acc.balance
+
+        candidates = {}
+        if unlock_value["Self"] > 0 and self_age < 59.5:
+            candidates["Self"] = (59.5 - self_age, unlock_value["Self"])
+        if unlock_value["Spouse"] > 0 and spouse_age < 59.5:
+            candidates["Spouse"] = (59.5 - spouse_age, unlock_value["Spouse"])
+
+        if not candidates:
+            return None
+
+        # Use the milestone with the largest locked balance
+        best = max(candidates.values(), key=lambda x: x[1])
+        return int(best[0] * 12)
+
+    def test_two_phase_spend(self, monthly_spend, months_phase_1, months_phase_2):
+        """Test whether a single spend level is sustainable across both phases."""
+        if not self.test_spend_level(monthly_spend, months_phase_1, include_income=False):
+            return False
+        phase_2_start_bal = self.start_balance_phase_2(monthly_spend, months_phase_1)
+        return self.test_spend_level(monthly_spend, months_phase_2, start_balance=phase_2_start_bal, month_offset_start=months_phase_1)
 
     def find_max_sustainable_spend(self):
         total_assets = sum(a.balance for a in self.accounts)
         if total_assets <= 0:
             return {"phase_1": 0, "phase_2": 0}
 
-        youngest_age = self.get_youngest_age()
-        youngest_59_5 = youngest_age + (59.5 - youngest_age) if youngest_age < 59.5 else youngest_age
+        months_phase_1 = self.get_primary_unlock_months()
 
-        if youngest_age >= 59.5:
-            target_months = (self.end_age - youngest_age) * 12
+        if months_phase_1 is None:
+            youngest_age = self.get_youngest_age()
+            target_months = int((self.end_age - youngest_age) * 12)
             return {"phase_1": self._binary_search_spend(target_months), "phase_2": None}
 
-        months_phase_1 = int((59.5 - youngest_age) * 12)
         months_phase_2 = int((self.end_age - 59.5) * 12)
 
-        if self.test_spend_level(0, months_phase_1, include_income=False):
-            phase_1_spend = self._binary_search_spend(months_phase_1, include_income=False)
-            phase_2_start_bal = self.start_balance_phase_2(phase_1_spend, months_phase_1)
-            phase_2_spend = self._binary_search_spend(months_phase_2, phase_2_start_bal, month_offset_start=months_phase_1)
-            return {"phase_1": phase_1_spend, "phase_2": phase_2_spend, "milestone_age": 59.5}
-        else:
+        # Binary search for max spend sustainable across both phases jointly
+        low, high, base_spend = 0, total_assets / ((months_phase_1 + months_phase_2) / 12) * 0.8, 0
+        for _ in range(50):
+            mid = (low + high) / 2
+            if self.test_two_phase_spend(mid, months_phase_1, months_phase_2):
+                base_spend = mid
+                low = mid
+            else:
+                high = mid
+
+        if base_spend == 0:
             return {"phase_1": 0, "phase_2": 0}
+
+        # Phase 2 may support higher spend due to income and unlocked accounts
+        phase_2_start_bal = self.start_balance_phase_2(base_spend, months_phase_1)
+        phase_2_spend = self._binary_search_spend(months_phase_2, phase_2_start_bal, month_offset_start=months_phase_1)
+
+        return {"phase_1": base_spend, "phase_2": phase_2_spend, "milestone_age": 59.5}
 
     def start_balance_phase_2(self, monthly_spend, months):
         temp_accounts = [Account(a.name, a.account_type, a.owner, a.balance, a.return_rate) for a in self.accounts]
-        temp_incomes = [IncomeStream(i.name, i.income_type, i.owner, i.monthly_amount, i.start_age, i.end_age, i.cola) for i in self.incomes]
-        temp_savings = SavingsAccount(balance=240000, rate=self.savings_rate)
+        savings_bal = sum(a.balance for a in self.accounts if a.account_type == 'Savings')
+        temp_savings = SavingsAccount(balance=savings_bal, rate=self.savings_rate)
 
         for month in range(months):
             target_date = self.get_month_date(month)
-            self_age = self.get_exact_age(self.self_dob, target_date) if self.self_dob else 65 + month / 12
-            spouse_age = self.get_exact_age(self.spouse_dob, target_date) if self.spouse_dob else 60 + month / 12
 
-            income = 0
-            for inc in temp_incomes:
-                age = self_age if inc.owner == "Self" else spouse_age
-                if inc.start_age <= age <= inc.end_age:
-                    income += inc.current_amount
-
-            temp_savings.deposit(income)
             temp_savings.withdraw(monthly_spend)
 
             for acc in temp_accounts:
-                acc.apply_growth(acc.return_rate / 12)
+                real_rate = (1 + acc.return_rate) / (1 + self.inflation_rate) - 1
+                acc.apply_growth(real_rate / 12)
 
             if target_date.month == 12:
-                temp_savings.apply_growth()
+                real_savings_rate = (1 + self.savings_rate) / (1 + self.inflation_rate) - 1
+                temp_savings.balance *= (1 + real_savings_rate)
 
         return sum(a.balance for a in temp_accounts) + temp_savings.balance
 
     def _binary_search_spend(self, months, start_balance=None, month_offset_start=0, include_income=True):
         assets_only = sum(a.balance for a in self.accounts)
-        savings_only = sum(a.balance for a in self.accounts if a.account_type == 'Savings')
-        total_assets = start_balance if start_balance else (assets_only + savings_only)
+        total_assets = start_balance if start_balance else assets_only
         if total_assets <= 0:
             return 0
 
