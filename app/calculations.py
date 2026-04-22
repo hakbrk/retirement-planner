@@ -173,6 +173,7 @@ class Account:
         self.return_rate = return_rate
         self.growth = 0
         self.contributions = 0
+        self.original_basis = balance
 
     def apply_growth(self, monthly_rate):
         if self.balance > 0:
@@ -183,6 +184,20 @@ class Account:
         available = min(self.balance, amount)
         self.balance -= available
         return available
+
+    def withdraw_with_tax(self, amount, annual_income):
+        available = min(self.balance, amount)
+        
+        tax = 0
+        if self.is_taxable() and annual_income > 0:
+            proportion_withdrawn = available / self.balance if self.balance > 0 else 0
+            basis_withdrawn = self.original_basis * proportion_withdrawn
+            gains = available - basis_withdrawn
+            if gains > 0:
+                tax = calculate_capital_gains_tax(gains, annual_income, "Married Filing Jointly")
+        
+        self.balance -= available
+        return available, tax
 
     def deposit(self, amount):
         self.balance += amount
@@ -373,7 +388,8 @@ class MonthlyProjection:
         self_age = self.get_age_at_date(self.self_dob, self.start_date) if self.self_dob else calculate_age(self.start_date)
         spouse_age = self.get_age_at_date(self.spouse_dob, self.start_date) if self.spouse_dob else self_age - 2
 
-        total_months = (self.end_age - self_age) * 12 if self_age else 600
+        youngest_age = min(self_age, spouse_age)
+        total_months = (self.end_age - youngest_age) * 12 if youngest_age else 600
 
         prior_year_income = 0
         prior_year_withdrawals = 0
@@ -449,43 +465,43 @@ class MonthlyProjection:
 
         return results
 
-    def find_max_sustainable_spend(self, target_months=None):
-        total_assets = sum(a.balance for a in self.accounts) + 240000
+    def get_youngest_age(self):
+        self_age = self.get_age_at_date(self.self_dob, self.start_date) if self.self_dob else 65
+        spouse_age = self.get_age_at_date(self.spouse_dob, self.start_date) if self.spouse_dob else 60
+        return min(self_age, spouse_age)
+
+    def find_max_sustainable_spend(self):
+        total_assets = sum(a.balance for a in self.accounts)
         if total_assets <= 0:
-            return 0
-            
-        if target_months is None:
-            if self.self_dob:
-                current_age = self.get_age_at_date(self.self_dob, self.start_date)
-            else:
-                current_age = 50
-            target_months = (self.end_age - current_age) * 12
+            return {"phase_1": 0, "phase_2": 0}
 
-        low = 0
-        high = total_assets / (target_months / 12) * 0.5
-        best = 0
+        youngest_age = self.get_youngest_age()
+        youngest_59_5 = youngest_age + (59.5 - youngest_age) if youngest_age < 59.5 else youngest_age
 
-        for _ in range(50):
-            test_amount = (low + high) / 2
-            if self.test_spend_level(test_amount, target_months):
-                best = test_amount
-                low = test_amount
-            else:
-                high = test_amount
+        if youngest_age >= 59.5:
+            target_months = (self.end_age - youngest_age) * 12
+            return {"phase_1": self._binary_search_spend(target_months), "phase_2": None}
 
-        return best
+        months_phase_1 = int((59.5 - youngest_age) * 12)
+        months_phase_2 = int((self.end_age - 59.5) * 12)
 
-    def test_spend_level(self, monthly_spend, months):
+        if self.test_spend_level(0, months_phase_1, include_income=False):
+            phase_1_spend = self._binary_search_spend(months_phase_1, include_income=False)
+            phase_2_start_bal = self.start_balance_phase_2(phase_1_spend, months_phase_1)
+            phase_2_spend = self._binary_search_spend(months_phase_2, phase_2_start_bal, month_offset_start=months_phase_1)
+            return {"phase_1": phase_1_spend, "phase_2": phase_2_spend, "milestone_age": 59.5}
+        else:
+            return {"phase_1": 0, "phase_2": 0}
+
+    def start_balance_phase_2(self, monthly_spend, months):
         temp_accounts = [Account(a.name, a.account_type, a.owner, a.balance, a.return_rate) for a in self.accounts]
         temp_incomes = [IncomeStream(i.name, i.income_type, i.owner, i.monthly_amount, i.start_age, i.end_age, i.cola) for i in self.incomes]
         temp_savings = SavingsAccount(balance=240000, rate=self.savings_rate)
 
         for month in range(months):
-            month_offset = month
-            target_date = self.get_month_date(month_offset)
-            
-            self_age = self.get_exact_age(self.self_dob, target_date) if self.self_dob else 50 + month_offset / 12
-            spouse_age = self.get_exact_age(self.spouse_dob, target_date) if self.spouse_dob else 48 + month_offset / 12
+            target_date = self.get_month_date(month)
+            self_age = self.get_exact_age(self.self_dob, target_date) if self.self_dob else 65 + month / 12
+            spouse_age = self.get_exact_age(self.spouse_dob, target_date) if self.spouse_dob else 60 + month / 12
 
             income = 0
             for inc in temp_incomes:
@@ -494,27 +510,96 @@ class MonthlyProjection:
                     income += inc.current_amount
 
             temp_savings.deposit(income)
-            savings_withdrawal = temp_savings.withdraw(monthly_spend)
+            temp_savings.withdraw(monthly_spend)
 
             for acc in temp_accounts:
                 acc.apply_growth(acc.return_rate / 12)
 
+            if target_date.month == 12:
+                temp_savings.apply_growth()
+
+        return sum(a.balance for a in temp_accounts) + temp_savings.balance
+
+    def _binary_search_spend(self, months, start_balance=None, month_offset_start=0, include_income=True):
+        assets_only = sum(a.balance for a in self.accounts)
+        savings_only = sum(a.balance for a in self.accounts if a.account_type == 'Savings')
+        total_assets = start_balance if start_balance else (assets_only + savings_only)
+        if total_assets <= 0:
+            return 0
+
+        low = 0
+        high = total_assets / (months / 12) * 0.8
+        best = 0
+
+        for _ in range(50):
+            test_amount = (low + high) / 2
+            if self.test_spend_level(test_amount, months, start_balance=start_balance, month_offset_start=month_offset_start, include_income=include_income):
+                best = test_amount
+                low = test_amount
+            else:
+                high = test_amount
+
+        return best
+
+    def test_spend_level(self, monthly_spend, months, start_balance=None, month_offset_start=0, include_income=True):
+        temp_accounts = [Account(a.name, a.account_type, a.owner, a.balance, a.return_rate) for a in self.accounts]
+        temp_incomes = [IncomeStream(i.name, i.income_type, i.owner, i.monthly_amount, i.start_age, i.end_age, i.cola) for i in self.incomes]
+        
+        initial_savings = 0
+        if start_balance is not None and month_offset_start > 0:
+            initial_savings = start_balance
+            for acc in temp_accounts:
+                acc.balance = 0
+        else:
+            for acc in temp_accounts:
+                if acc.account_type == 'Savings':
+                    initial_savings += acc.balance
+                    acc.balance = 0
+                
+        temp_savings = SavingsAccount(balance=initial_savings, rate=self.savings_rate)
+        
+        annual_tax = 0
+        for month in range(months):
+            month_offset = month_offset_start + month
+            target_date = self.get_month_date(month_offset)
+            
+            self_age = self.get_exact_age(self.self_dob, target_date) if self.self_dob else 51 + month_offset / 12
+            spouse_age = self.get_exact_age(self.spouse_dob, target_date) if self.spouse_dob else 44 + month_offset / 12
+
+            income = 0
+            if include_income:
+                for inc in temp_incomes:
+                    age = self_age if inc.owner == "Self" else spouse_age
+                    if inc.start_age <= age <= inc.end_age:
+                        income += inc.current_amount
+            temp_savings.deposit(income)
+                
+            savings_withdrawal = temp_savings.withdraw(monthly_spend)
+
+            for acc in temp_accounts:
+                real_rate = (1 + acc.return_rate) / (1 + self.inflation_rate) - 1
+                acc.apply_growth(real_rate / 12)
+
             short_fall = monthly_spend - savings_withdrawal
+            
+            effective_income = income + annual_tax / 12
             if short_fall > 0:
                 sorted_accounts = sorted(temp_accounts, key=lambda a: get_withdrawal_priority(a.account_type))
                 for acc in sorted_accounts:
                     if not self.can_access(acc, self_age, spouse_age):
                         continue
                     if acc.balance > 0:
-                        available = acc.withdraw(short_fall)
-                        short_fall -= available
-                        temp_savings.deposit(available)
+                        withdrawn, tax = acc.withdraw_with_tax(short_fall, effective_income * 12)
+                        short_fall -= withdrawn
+                        annual_tax += tax
+                        temp_savings.deposit(withdrawn)
                         if short_fall <= 0:
                             break
                 if short_fall > 0:
                     return False
 
             if target_date.month == 12:
-                temp_savings.apply_growth()
+                real_savings_rate = (1 + self.savings_rate) / (1 + self.inflation_rate) - 1
+                temp_savings.balance *= (1 + real_savings_rate)
 
-        return temp_savings.balance > 0 or sum(a.balance for a in temp_accounts) > 0
+        return True

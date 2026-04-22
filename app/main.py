@@ -363,7 +363,21 @@ def main():
                 if calculate_max:
                     with st.spinner("Calculating max sustainable spend..."):
                         max_spend = projection.find_max_sustainable_spend()
-                    st.success(f"Max sustainable monthly spend: ${max_spend:,.0f}")
+                    
+                    if max_spend.get("milestone_age"):
+                        youngest_age = projection.get_youngest_age()
+                        milestone = max_spend["milestone_age"]
+                        years_to_milestone = milestone - youngest_age
+                        st.info(f"**Phase Breakdown (youngest hits {milestone} in {years_to_milestone:.1f} years):**")
+                        c1, c2 = st.columns(2)
+                        with c1:
+                            st.success(f"Pre-{milestone}: ${max_spend['phase_1']:,.0f}/mo")
+                        with c2:
+                            st.success(f"Post-{milestone}: ${max_spend['phase_2']:,.0f}/mo")
+                    elif max_spend.get("phase_1"):
+                        st.success(f"Max sustainable monthly spend: ${max_spend['phase_1']:,.0f}")
+                    else:
+                        st.error("Not enough funds to sustain any spend level")
                 
                 default_spend = st.number_input("Monthly Spend to Project ($)", value=10000, min_value=0, step=500, key="monthly_spend")
                 
