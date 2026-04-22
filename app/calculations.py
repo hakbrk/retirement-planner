@@ -189,7 +189,7 @@ class Account:
         available = min(self.balance, amount)
         
         tax = 0
-        if self.is_taxable() and annual_income > 0:
+        if self.is_taxable():
             proportion_withdrawn = available / self.balance if self.balance > 0 else 0
             basis_withdrawn = self.original_basis * proportion_withdrawn
             gains = available - basis_withdrawn
@@ -241,7 +241,7 @@ class IncomeStream:
 
     def update_for_inflation(self, inflation_rate, year_offset):
         if self.cola and year_offset > 0:
-            self.current_amount *= (1 + inflation_rate) ** year_offset
+            self.current_amount = self.monthly_amount * (1 + inflation_rate) ** year_offset
 
 class MonthlyProjection:
     def __init__(self, accounts, incomes, expenses, inflation_rate, filing_status, state_tax_rate,
@@ -261,7 +261,11 @@ class MonthlyProjection:
         self.buffer_months = buffer_months
         self.savings_rate = savings_rate
         self.monthly_inflation = (1 + inflation_rate) ** (1/12) - 1
-        self.savings = SavingsAccount(balance=0, rate=savings_rate)
+        savings_balance = sum(a.balance for a in accounts if a.account_type == 'Savings')
+        self.savings = SavingsAccount(balance=savings_balance, rate=savings_rate)
+        for acc in accounts:
+            if acc.account_type == 'Savings':
+                acc.balance = 0
 
     def calculate_tax(self, annual_income):
         return calculate_federal_tax(annual_income, self.filing_status)
@@ -292,9 +296,9 @@ class MonthlyProjection:
             age = self_age if inc.owner == "Self" else spouse_age
             if age is None:
                 age = self_age
-            if inc.start_age <= age <= inc.end_age:
+            if inc.start_age <= age and (inc.end_age == 0 or age <= inc.end_age):
                 inc.update_for_inflation(self.inflation_rate, month_offset // 12)
-                income[inc.owner] += inc.current_amount
+                income[inc.owner.lower()] += inc.current_amount
         return income
 
     def calculate_annual_expenses(self, year_offset):
@@ -320,7 +324,7 @@ class MonthlyProjection:
         return is_account_accessible(account.account_type, owner_age)
 
     def get_accessible_balance(self, self_age, spouse_age):
-        accessible = 0
+        accessible = self.savings.balance  # savings buffer is always accessible
         non_accessible = 0
         for acc in self.accounts:
             if self.can_access(acc, self_age, spouse_age):
@@ -329,11 +333,12 @@ class MonthlyProjection:
                 non_accessible += acc.balance
         return accessible, non_accessible
 
-    def withdraw_tax_efficient(self, amount_needed, self_age, spouse_age):
+    def withdraw_tax_efficient(self, amount_needed, self_age, spouse_age, annual_income=0):
         if amount_needed <= 0:
-            return {}
+            return {}, 0
 
         available = {}
+        total_tax = 0
         remaining = amount_needed
 
         sorted_accounts = sorted(self.accounts, key=lambda a: get_withdrawal_priority(a.account_type))
@@ -344,8 +349,9 @@ class MonthlyProjection:
             if acc.balance <= 0:
                 continue
 
-            withdrawn = acc.withdraw(remaining)
+            withdrawn, tax = acc.withdraw_with_tax(remaining, annual_income)
             remaining -= withdrawn
+            total_tax += tax
             key = f"{acc.name}_{acc.account_type}"
             if key not in available:
                 available[key] = 0
@@ -354,7 +360,7 @@ class MonthlyProjection:
             if remaining <= 0:
                 break
 
-        return available
+        return available, total_tax
 
     def deposit_to_brokerage(self, amount):
         for acc in self.accounts:
@@ -364,23 +370,26 @@ class MonthlyProjection:
         if self.accounts:
             self.accounts[0].deposit(amount)
 
-    def rebalance_for_buffer(self, annual_expenses, prior_year_tax, self_age, spouse_age):
+    def rebalance_for_buffer(self, annual_expenses, prior_year_tax, self_age, spouse_age, annual_income=0):
         target_savings = (annual_expenses + prior_year_tax) * (1 + self.buffer_months / 12)
-        
+
         current_savings = self.savings.balance
         current_savings *= (1 + self.savings_rate)
-        
+
         shortfall = max(0, target_savings - current_savings)
-        
+
+        capital_gains_tax = 0
         if shortfall > 0:
-            withdrawals = self.withdraw_tax_efficient(shortfall, self_age, spouse_age)
+            withdrawals, capital_gains_tax = self.withdraw_tax_efficient(shortfall, self_age, spouse_age, annual_income)
             for amount in withdrawals.values():
                 self.savings.deposit(amount)
-        
+
         excess = max(0, current_savings - target_savings)
         if excess > 0:
             self.savings.withdraw(excess)
             self.deposit_to_brokerage(excess)
+
+        return capital_gains_tax
 
     def run_projection(self, monthly_spend):
         results = []
@@ -388,26 +397,26 @@ class MonthlyProjection:
         self_age = self.get_age_at_date(self.self_dob, self.start_date) if self.self_dob else calculate_age(self.start_date)
         spouse_age = self.get_age_at_date(self.spouse_dob, self.start_date) if self.spouse_dob else self_age - 2
 
-        youngest_age = min(self_age, spouse_age)
-        total_months = (self.end_age - youngest_age) * 12 if youngest_age else 600
+        total_months = int((self.end_age - self_age) * 12) if self_age else 600
 
         prior_year_income = 0
         prior_year_withdrawals = 0
         prior_year_tax = 0
+        annual_capital_gains_tax = 0
 
         current_year = self.start_date.year
 
         for month in range(total_months):
             month_offset = month
             target_date = self.get_month_date(month_offset)
-            
+
             current_self_age = self.get_exact_age(self.self_dob, target_date) if self.self_dob else self_age + month_offset / 12
             current_spouse_age = self.get_exact_age(self.spouse_dob, target_date) if self.spouse_dob else spouse_age + month_offset / 12
 
             if target_date.month == 1 and target_date.year > current_year:
                 self.savings.apply_growth()
-                annual_expenses = self.calculate_annual_expenses(target_date.year - self.start_date.year)
-                self.rebalance_for_buffer(annual_expenses, prior_year_tax, current_self_age, current_spouse_age)
+                cg_tax = self.rebalance_for_buffer(monthly_spend * 12, prior_year_tax, current_self_age, current_spouse_age, prior_year_income)
+                annual_capital_gains_tax = cg_tax
                 current_year = target_date.year
 
             income = self.calculate_monthly_income(month_offset, current_self_age, current_spouse_age)
@@ -417,9 +426,22 @@ class MonthlyProjection:
 
             expenses = monthly_spend
             savings_withdrawal = self.savings.withdraw(expenses)
+            shortfall = expenses - savings_withdrawal
 
             for acc in self.accounts:
                 acc.apply_growth(self.monthly_inflation)
+
+            if shortfall > 0:
+                sorted_accts = sorted(self.accounts, key=lambda a: get_withdrawal_priority(a.account_type))
+                for acc in sorted_accts:
+                    if not self.can_access(acc, current_self_age, current_spouse_age):
+                        continue
+                    if acc.balance > 0:
+                        withdrawn, tax = acc.withdraw_with_tax(shortfall, income_total * 12)
+                        shortfall -= withdrawn
+                        annual_capital_gains_tax += tax
+                        if shortfall <= 0:
+                            break
 
             rmd_total = 0
             for acc in self.accounts:
@@ -436,13 +458,14 @@ class MonthlyProjection:
             else:
                 federal_tax = 0
 
+            capital_gains_tax = annual_capital_gains_tax / 12
             state_tax = (income_total + rmd_total) * self.state_tax_rate / 12
-            after_tax = income_total + rmd_total - expenses - federal_tax - state_tax
+            after_tax = income_total + rmd_total - expenses - federal_tax - state_tax - capital_gains_tax
 
             if target_date.month == 12:
                 prior_year_income = income_total * 12
                 prior_year_withdrawals = 0
-                prior_year_tax = (federal_tax + state_tax) * 12
+                prior_year_tax = (federal_tax + state_tax) * 12 + annual_capital_gains_tax
 
             accessible, non_accessible = self.get_accessible_balance(current_self_age, current_spouse_age)
 
@@ -456,6 +479,7 @@ class MonthlyProjection:
                 "rmd": rmd_total,
                 "expenses": expenses,
                 "federal_tax": federal_tax,
+                "capital_gains_tax": capital_gains_tax,
                 "state_tax": state_tax,
                 "savings_balance": self.savings.balance,
                 "accessible": accessible,
@@ -475,8 +499,8 @@ class MonthlyProjection:
 
     def get_primary_unlock_months(self):
         """Return months until the largest unlock event (by balance), or None if no locked accounts."""
-        self_age = self.get_age_at_date(self.self_dob, self.start_date) if self.self_dob else 65
-        spouse_age = self.get_age_at_date(self.spouse_dob, self.start_date) if self.spouse_dob else 60
+        self_age = self.get_exact_age(self.self_dob, self.start_date) if self.self_dob else 65
+        spouse_age = self.get_exact_age(self.spouse_dob, self.start_date) if self.spouse_dob else 60
 
         unlock_value = {"Self": 0, "Spouse": 0}
         for acc in self.accounts:
@@ -496,15 +520,17 @@ class MonthlyProjection:
             return None
 
         # Use the milestone with the largest locked balance
+        # ceil ensures Phase 2 starts on or after the 59.5 birthday, not one month early
+        import math
         best = max(candidates.values(), key=lambda x: x[1])
-        return int(best[0] * 12)
+        return math.ceil(best[0] * 12)
 
     def test_two_phase_spend(self, monthly_spend, months_phase_1, months_phase_2):
         """Test whether a single spend level is sustainable across both phases."""
         if not self.test_spend_level(monthly_spend, months_phase_1, include_income=False):
             return False
-        phase_2_start_bal = self.start_balance_phase_2(monthly_spend, months_phase_1)
-        return self.test_spend_level(monthly_spend, months_phase_2, start_balance=phase_2_start_bal, month_offset_start=months_phase_1)
+        phase2_state = self.simulate_phase_1(monthly_spend, months_phase_1)
+        return self.test_spend_level(monthly_spend, months_phase_2, phase2_state=phase2_state, month_offset_start=months_phase_1)
 
     def find_max_sustainable_spend(self):
         total_assets = sum(a.balance for a in self.accounts)
@@ -534,34 +560,51 @@ class MonthlyProjection:
             return {"phase_1": 0, "phase_2": 0}
 
         # Phase 2 may support higher spend due to income and unlocked accounts
-        phase_2_start_bal = self.start_balance_phase_2(base_spend, months_phase_1)
-        phase_2_spend = self._binary_search_spend(months_phase_2, phase_2_start_bal, month_offset_start=months_phase_1)
+        phase2_state = self.simulate_phase_1(base_spend, months_phase_1)
+        phase_2_spend = self._binary_search_spend(months_phase_2, phase2_state=phase2_state, month_offset_start=months_phase_1)
 
         return {"phase_1": base_spend, "phase_2": phase_2_spend, "milestone_age": 59.5}
 
-    def start_balance_phase_2(self, monthly_spend, months):
+    def simulate_phase_1(self, monthly_spend, months):
+        """Simulate Phase 1 spending and return ending account states for Phase 2 initialisation."""
         temp_accounts = [Account(a.name, a.account_type, a.owner, a.balance, a.return_rate) for a in self.accounts]
-        savings_bal = sum(a.balance for a in self.accounts if a.account_type == 'Savings')
-        temp_savings = SavingsAccount(balance=savings_bal, rate=self.savings_rate)
+        temp_savings = SavingsAccount(balance=self.savings.balance, rate=self.savings_rate)
 
         for month in range(months):
             target_date = self.get_month_date(month)
+            self_age = self.get_exact_age(self.self_dob, target_date) if self.self_dob else 51 + month / 12
+            spouse_age = self.get_exact_age(self.spouse_dob, target_date) if self.spouse_dob else 44 + month / 12
 
-            temp_savings.withdraw(monthly_spend)
+            savings_withdrawal = temp_savings.withdraw(monthly_spend)
+            shortfall = monthly_spend - savings_withdrawal
 
             for acc in temp_accounts:
                 real_rate = (1 + acc.return_rate) / (1 + self.inflation_rate) - 1
                 acc.apply_growth(real_rate / 12)
 
+            if shortfall > 0:
+                for acc in sorted(temp_accounts, key=lambda a: get_withdrawal_priority(a.account_type)):
+                    if not self.can_access(acc, self_age, spouse_age):
+                        continue
+                    if acc.balance > 0:
+                        withdrawn = min(acc.balance, shortfall)
+                        acc.balance -= withdrawn
+                        shortfall -= withdrawn
+                        if shortfall <= 0:
+                            break
+
             if target_date.month == 12:
                 real_savings_rate = (1 + self.savings_rate) / (1 + self.inflation_rate) - 1
                 temp_savings.balance *= (1 + real_savings_rate)
 
-        return sum(a.balance for a in temp_accounts) + temp_savings.balance
+        return temp_accounts, temp_savings
 
-    def _binary_search_spend(self, months, start_balance=None, month_offset_start=0, include_income=True):
-        assets_only = sum(a.balance for a in self.accounts)
-        total_assets = start_balance if start_balance else assets_only
+    def _binary_search_spend(self, months, phase2_state=None, month_offset_start=0, include_income=True):
+        if phase2_state is not None:
+            p2_accounts, p2_savings = phase2_state
+            total_assets = sum(a.balance for a in p2_accounts) + p2_savings.balance
+        else:
+            total_assets = sum(a.balance for a in self.accounts)
         if total_assets <= 0:
             return 0
 
@@ -571,7 +614,7 @@ class MonthlyProjection:
 
         for _ in range(50):
             test_amount = (low + high) / 2
-            if self.test_spend_level(test_amount, months, start_balance=start_balance, month_offset_start=month_offset_start, include_income=include_income):
+            if self.test_spend_level(test_amount, months, phase2_state=phase2_state, month_offset_start=month_offset_start, include_income=include_income):
                 best = test_amount
                 low = test_amount
             else:
@@ -579,22 +622,17 @@ class MonthlyProjection:
 
         return best
 
-    def test_spend_level(self, monthly_spend, months, start_balance=None, month_offset_start=0, include_income=True):
-        temp_accounts = [Account(a.name, a.account_type, a.owner, a.balance, a.return_rate) for a in self.accounts]
+    def test_spend_level(self, monthly_spend, months, phase2_state=None, month_offset_start=0, include_income=True):
         temp_incomes = [IncomeStream(i.name, i.income_type, i.owner, i.monthly_amount, i.start_age, i.end_age, i.cola) for i in self.incomes]
-        
-        initial_savings = 0
-        if start_balance is not None and month_offset_start > 0:
-            initial_savings = start_balance
-            for acc in temp_accounts:
-                acc.balance = 0
+
+        if phase2_state is not None:
+            # Phase 2: restore actual account states from end of Phase 1 simulation
+            p2_accounts, p2_savings = phase2_state
+            temp_accounts = [Account(a.name, a.account_type, a.owner, a.balance, a.return_rate) for a in p2_accounts]
+            temp_savings = SavingsAccount(balance=p2_savings.balance, rate=self.savings_rate)
         else:
-            for acc in temp_accounts:
-                if acc.account_type == 'Savings':
-                    initial_savings += acc.balance
-                    acc.balance = 0
-                
-        temp_savings = SavingsAccount(balance=initial_savings, rate=self.savings_rate)
+            temp_accounts = [Account(a.name, a.account_type, a.owner, a.balance, a.return_rate) for a in self.accounts]
+            temp_savings = SavingsAccount(balance=self.savings.balance, rate=self.savings_rate)
         
         annual_tax = 0
         for month in range(months):
@@ -608,7 +646,7 @@ class MonthlyProjection:
             if include_income:
                 for inc in temp_incomes:
                     age = self_age if inc.owner == "Self" else spouse_age
-                    if inc.start_age <= age <= inc.end_age:
+                    if inc.start_age <= age and (inc.end_age == 0 or age <= inc.end_age):
                         income += inc.current_amount
             temp_savings.deposit(income)
                 
@@ -630,7 +668,6 @@ class MonthlyProjection:
                         withdrawn, tax = acc.withdraw_with_tax(short_fall, effective_income * 12)
                         short_fall -= withdrawn
                         annual_tax += tax
-                        temp_savings.deposit(withdrawn)
                         if short_fall <= 0:
                             break
                 if short_fall > 0:
